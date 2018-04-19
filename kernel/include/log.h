@@ -9,7 +9,7 @@ extern const char* MOD_NAME;
   printk(KERN_DEBUG "%s @ %s(): " fmt "\n", MOD_NAME, __func__, ##args)
 #define LOG_INFO(fmt, args...)                                                 \
   printk(KERN_INFO "%s @ %s(): " fmt "\n", MOD_NAME, __func__, ##args)
-#define LOG_ERROR(fmt, args...)                                                  \
+#define LOG_ERROR(fmt, args...)                                                \
   printk(KERN_ERR "%s @ %s(): " fmt "\n", MOD_NAME, __func__, ##args)
 
 #endif

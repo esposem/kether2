@@ -7,7 +7,7 @@
 #include <linux/netdevice.h>
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Paulo Coelho");
+MODULE_AUTHOR("Paulo Coelho - Emanuele Giuseppe Esposito");
 MODULE_VERSION("1.0");
 MODULE_DESCRIPTION("Raw sockets in kernel space.");
 
@@ -15,30 +15,30 @@ MODULE_DESCRIPTION("Raw sockets in kernel space.");
 const char* MOD_NAME = "KECHO";
 
 static struct net_device* dev;
-static struct stats*      st = NULL;
+// static struct stats*      st = NULL;
 
 static char* if_name = "enp0s3";
 module_param(if_name, charp, 0000);
 
+struct my_msg
+{
+  char msg[32];
+  int  id;
+};
+
 static void
 rcv_paxos_msg(struct net_device* dev, uint8_t src_addr[ETH_ALEN], char* rmsg,
-              size_t len, void* arg)
+              size_t len)
 {
-  static int rcv = 0;
-  if (rcv == 0)
-    st = stats_new();
-
-  rcv++;
-  if (rcv % 20000 == 0) {
-    stats_add(st, rcv);
-    LOG_DEBUG("got message '%s' with %zu bytes.", rmsg, len);
-  }
-  // if (sent < 10000)
-  eth_send(dev, src_addr, PAXOS_ETH_TYPE, rmsg, len);
+#ifdef PRINT
+  struct my_msg* msg = (struct my_msg*)rmsg;
+  LOG_INFO("Received id %d mess %s. Sending it back", msg->id, msg->msg);
+#endif
+  eth_send(dev, src_addr, PAXOS_ETH_OK, rmsg, len);
 }
 
-int
-init_module(void)
+static int __init
+           init_echo(void)
 {
   dev = eth_init(if_name);
   if (dev) {
@@ -46,9 +46,9 @@ init_module(void)
              dev->name, dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
              dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
 
-    if (eth_listen(dev, PAXOS_ETH_TYPE, rcv_paxos_msg, NULL) == 0) {
+    if (eth_listen(dev, PAXOS_ETH_TYPE, rcv_paxos_msg) == 0) {
       LOG_ERROR("error while setting up interface %s", dev->name);
-      return 1;
+      return 0;
     }
     return 0;
   }
@@ -57,16 +57,12 @@ init_module(void)
   return 1;
 }
 
-void
-cleanup_module(void)
+static void __exit
+            cleanup_echo(void)
 {
   eth_destroy(dev);
-  if (st) {
-    stats_save(st, NULL, 1);
-    stats_destroy(st);
-  }
   LOG_INFO("unloading module.");
 }
 
-// module_init(init_module);
-// module_exit(cleanup_module);
+module_init(init_echo);
+module_exit(cleanup_echo);

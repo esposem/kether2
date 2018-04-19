@@ -1,4 +1,5 @@
 #include "eth.h"
+#include "log.h"
 #include <linux/if_ether.h>
 #include <linux/net.h>
 #include <linux/netdevice.h>
@@ -8,17 +9,14 @@
 #include <linux/string.h>
 #include <net/dst.h>
 
-#define MAX_CB 3
-#define PAXOS_ETH_TYPE 0xcafe
-
 struct callback
 {
   struct packet_type pt;
-  rcv_cb             cb[MAX_CB]; // TODO LATER add callback array
-  void*              arg[MAX_CB];
+  rcv_cb             cb;
 };
 
 static struct callback cbs[MAX_PROTO];
+static int             cbs_count;
 
 static int packet_recv(struct sk_buff* sk, struct net_device* dev,
                        struct packet_type* pt, struct net_device* dev2);
@@ -26,43 +24,32 @@ static int packet_recv(struct sk_buff* sk, struct net_device* dev,
 struct net_device*
 eth_init(const char* if_name)
 {
+  cbs_count = 0;
   memset(cbs, 0, sizeof(cbs));
   return dev_get_by_name(&init_net, if_name);
 }
 
 int
-eth_listen(struct net_device* dev, uint16_t proto, rcv_cb cb, void* arg)
+eth_listen(struct net_device* dev, uint16_t proto, rcv_cb cb)
 {
-  int i = proto - PAXOS_ETH_TYPE;
-  int k = 0;
+  int i;
 
-  if (i < 0 || i >= MAX_PROTO) {
+  if (cbs_count == MAX_PROTO) {
+    LOG_ERROR("reached maximum numbers of listeners.");
     return 0;
   }
-
-  while (k < MAX_CB && cbs[i].cb[k] != NULL) {
-    // there is already such callback, ignore this
-    if (cbs[i].cb[k] == cb) {
-      return 0;
-    }
-    k++;
+  for (i = 0; i < cbs_count; ++i) {
+    if (cbs[i].pt.type == htons(proto))
+      break;
   }
-  // no space for an additional callback!
-  if (k >= MAX_CB) {
-    return 0;
+  cbs[i].pt.type = htons(proto);
+  cbs[i].pt.func = packet_recv;
+  cbs[i].pt.dev = dev;
+  cbs[i].cb = cb;
+  if (i == cbs_count) {
+    cbs_count++;
+    dev_add_pack(&cbs[i].pt);
   }
-
-  // there are callbacks already registered: remove them first
-  if (k != 0) {
-    dev_remove_pack(&cbs[i].pt);
-  } else { // first callback registered
-    cbs[i].pt.type = htons(proto);
-    cbs[i].pt.func = packet_recv;
-    cbs[i].pt.dev = dev;
-  }
-  cbs[i].cb[k] = cb;
-  cbs[i].arg[k] = arg;
-  dev_add_pack(&cbs[i].pt);
   return 1;
 }
 
@@ -70,32 +57,62 @@ static int
 packet_recv(struct sk_buff* skb, struct net_device* dev, struct packet_type* pt,
             struct net_device* src_dev)
 {
-  uint16_t       proto = ntohs(skb->protocol);
+  int            i;
+  uint16_t       proto = skb->protocol;
   struct ethhdr* eth = eth_hdr(skb);
   char           data[ETH_DATA_LEN];
   size_t         len = skb->len;
-  int            i = proto, k = 0;
-
+  char*          data_p = data;
   skb_copy_bits(skb, 0, data, len);
-  while (k < MAX_CB && cbs[i].cb[k] != NULL) {
-    cbs[i].cb[k](dev, eth->h_source, data, len, cbs[i].arg[k]);
-    k++;
-  }
 
+  for (i = 0; i < cbs_count; ++i) {
+    if (cbs[i].pt.type == proto) {
+      if (memcmp(eth->h_source, dev->dev_addr, ETH_ALEN) == 0) {
+#ifdef PRINT
+        LOG_INFO("This should come from Localhost");
+#endif
+        data_p += ETH_HLEN;
+        len -= ETH_HLEN;
+      }
+#ifdef PRINT
+      else {
+        LOG_INFO("This should come from Outside");
+      }
+#endif
+
+      cbs[i].cb(dev, eth->h_source, data_p, len);
+      goto free_skb;
+    }
+  }
+  LOG_ERROR("no callback for protocol number 0x%.4X", proto);
+free_skb:
   kfree_skb(skb);
   return 0;
+}
+
+// dumbest thing to do: reimplement dev_loopback_xmit without
+// the warning
+void
+dev_loopback_xmit2(struct sk_buff* skb)
+{
+  skb_reset_mac_header(skb);
+  __skb_pull(skb, skb_network_offset(skb));
+  skb->pkt_type = PACKET_LOOPBACK;
+  skb->ip_summed = CHECKSUM_UNNECESSARY;
+  skb_dst_force(skb);
+  netif_rx(skb);
 }
 
 int
 eth_send(struct net_device* dev, uint8_t dest_addr[ETH_ALEN], uint16_t proto,
          const char* msg, size_t len)
 {
-  int            ret;
-  unsigned char* data;
-
+  int             ret = 0;
+  unsigned char*  data;
   struct sk_buff* skb = alloc_skb(ETH_FRAME_LEN, GFP_ATOMIC);
 
   skb->dev = dev;
+  skb->pkt_type = PACKET_OUTGOING;
 
   skb_reserve(skb, ETH_HLEN);
   /*changing Mac address */
@@ -109,27 +126,29 @@ eth_send(struct net_device* dev, uint8_t dest_addr[ETH_ALEN], uint16_t proto,
     len = ETH_DATA_LEN;
 
   data = skb_put(skb, len);
-
   memcpy(data, msg, len);
-  if (memcmp(dev->dev_addr, dest_addr, ETH_ALEN * sizeof(uint8_t)) == 0) {
-    skb->pkt_type = PACKET_LOOPBACK;
-    skb_dst_force(skb);
-    netif_rx_ni(skb);
+
+  if (memcmp(dev->dev_addr, dest_addr, ETH_ALEN) == 0) {
+#ifdef PRINT
+    LOG_INFO("Sending to Localhost");
+#endif
+    dev_loopback_xmit2(skb);
   } else {
-    skb->pkt_type = PACKET_OUTGOING;
+#ifdef PRINT
+    LOG_INFO("Sending Outside");
+#endif
     ret = dev_queue_xmit(skb);
   }
-  return 1;
+  return !ret;
 }
 
 int
 eth_destroy(struct net_device* dev)
 {
   int i;
-  for (i = 0; i < MAX_PROTO; ++i) {
-    if (cbs[i].cb[0] != NULL)
-      dev_remove_pack(&cbs[i].pt);
-  }
+
+  for (i = 0; i < cbs_count; ++i)
+    dev_remove_pack(&cbs[i].pt);
   return 1;
 }
 
