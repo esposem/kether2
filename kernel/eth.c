@@ -100,7 +100,7 @@ dev_loopback_xmit2(struct sk_buff* skb)
   skb->pkt_type = PACKET_LOOPBACK;
   skb->ip_summed = CHECKSUM_UNNECESSARY;
   skb_dst_force(skb);
-  netif_rx(skb);
+  netif_rx_ni(skb);
 }
 
 int
